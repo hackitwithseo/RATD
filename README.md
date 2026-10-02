@@ -1,1 +1,2 @@
 RAT
+pip install discord.py opencv-python pygrabber pyaudio pycryptodome
