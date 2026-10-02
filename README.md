@@ -1,6 +1,6 @@
 # RATD
 
- Remote Access Trojan
+ Remote Access Trojan For Discrod
 
 ## **Requirements**
 ```
